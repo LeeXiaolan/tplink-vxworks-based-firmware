@@ -13,50 +13,15 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 '''
 
-import re
+import os
+import os.path
 import sys
-
-def parsePt(mv):
-  for i in xrange(min(len(mv), 1024)):
-    if mv[i] == '\x00':
-      end = i
-      break
-  else:
-    raise ValueError('Not \\x00 terminated.')
-  arr = re.split(r'\t\r\n', mv[:end].tobytes())
-
-  result = list()
-  for i in arr:
-    if len(i) > 0:
-      items = i.split()
-      if len(items) > 0 and (len(items) % 2 == 0):
-        d = dict()
-        for j in xrange(0, len(items), 2):
-          key, value = items[j], items[j + 1]
-          if key == 'base' or key == 'size':
-            d[key] = int(value, 16)
-          else:
-            d[key] = value
-        result.append(d)
-  return result
-
-def extract(mv, pt):
-  for item in pt:
-    with open(item['fwup-ptn'], 'wb') as of:
-      base, size = item['base'], item['size']
-      of.write(mv[base:base + size].tobytes())
-
-def main(fn):
-  with open(fn, 'rb') as f:
-    data = f.read()
-    mv = memoryview(data)[0x5c:]
-    pt = parsePt(mv)
-    extract(mv, pt)
 
 if __name__ == '__main__':
   if len(sys.argv) != 2:
     print >>sys.stderr, """Usage: %s FILE\n"""%sys.argv[0]
     sys.exit(1)
-  main(sys.argv[1])
+  fw = os.path.join(os.path.dirname(__file__), 'fw')
+  os.system('%s unpack "%s"' % (fw, sys.argv[1]))
 
 # vim: fenc=utf8 sw=2 ts=2

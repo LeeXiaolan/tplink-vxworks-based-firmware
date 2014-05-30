@@ -1,0 +1,236 @@
+#!/usr/bin/env python2
+'''
+Extract partitions from TP-LINK VxWorks-based router firmware.
+Copyright (C) 2014 Xiaolan.Lee<LeeXiaolan@gmail.com>
+License: GPLv2 (see LICENSE for details).
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+'''
+
+import binascii
+import hashlib
+import logging
+import os
+import os.path
+import re
+import struct
+import sys
+
+import docopt
+
+__opt__ = '''Usage:
+  %(prog)s unpack [-v... -r DIR] FILE
+  %(prog)s pack [-v... -r DIR -m MODEL] FILE
+  %(prog)s check-md5 [-v... -m MODEL] FILE
+  %(prog)s fix-md5 [-v... -m MODEL] FILE
+
+Options:
+  -r DIR, --root           Root directory, unpack to or pack from[default: .].
+  -m MODEL, --model MODEL  Model ID and version[default: WVR300V1].
+  -v, --verbose            Verbose mode.
+'''
+
+MODELS = {
+  'WVR300V1': {
+    'id': '\x03\x00\x00\x01\x00\x00\x00\x01',
+  },
+}
+DEFAULT_MD5_PLACEHOLDER = '\x7a\x2b\x15\xed\x9b\x98\x59\x6d\xe5\x04\xab\x44\xac\x2a\x9f\x4e'
+DEFAULT_VENDOR = 'TP-LINK_TECHNOLOGIES_CO.'
+PTN_TABLE_SIZE = 0x800
+
+def parsePt(mv):
+  for i in xrange(min(len(mv), 1024)):
+    if mv[i] == '\x00':
+      end = i
+      break
+  else:
+    raise ValueError('Not \\x00 terminated.')
+  arr = re.split(r'\t\r\n', mv[:end].tobytes())
+
+  result = list()
+  for i in arr:
+    if len(i) > 0:
+      items = i.split()
+      if len(items) > 0 and (len(items) % 2 == 0):
+        d = dict()
+        for j in xrange(0, len(items), 2):
+          key, value = items[j], items[j + 1]
+          if key == 'base' or key == 'size':
+            d[key] = int(value, 16)
+          else:
+            d[key] = value
+        result.append(d)
+  return result
+
+def extract(opt, mv, pt):
+  root = opt['--root']
+  if not os.path.exists(root):
+    os.mkdir(root)
+
+  for item in pt:
+    path = os.path.join(root, item['fwup-ptn'])
+    with open(path, 'wb') as of:
+      base, size = item['base'], item['size']
+      of.write(mv[base:base + size].tobytes())
+
+def calcMd5(opt):
+  try:
+    model = MODELS[opt['--model']]
+  except KeyError as e:
+    print 'Unsupported model:', opt['--model']
+    model = {}
+
+  placeholder = model.get('md5Placeholder', DEFAULT_MD5_PLACEHOLDER)
+
+  md5 = hashlib.md5()
+  md5.update(placeholder)
+  with open(opt['FILE'], 'rb') as fs:
+    # Skip the first 4 bytes.
+    _ = fs.read(4)
+
+    old = fs.read(16)
+    md5.update(fs.read())
+
+  return old, md5.digest()
+
+def checkMd5(opt):
+  old, expect = calcMd5(opt)
+  if old != expect:
+    print 'MD5 sum mismatch.\n  Expect: %s\n  Found:  %s' % (
+        binascii.hexlify(expect),
+        binascii.hexlify(old),
+    )
+    return 2
+  elif opt['--verbose'] > 0:
+    print 'MD5 sum is correct!'
+  return 0
+
+def fixMd5(opt):
+  old, expect = calcMd5(opt)
+  if old != expect:
+    with open(opt['FILE'], 'rb+') as fs:
+      fs.seek(4, os.SEEK_SET)
+      fs.write(expect)
+  return 0
+
+class Ptn(object):
+  def __init__(self, name=None, data=None):
+    self.name = name
+    self.data = data
+
+  @property
+  def size(self):
+    return len(self.data)
+
+PARTITION_TABLE = 'partition-table'
+
+def loadPtns(opt):
+  root = opt['--root']
+  ptns = []
+  totalSize = 0
+  for fileName in os.listdir(root):
+    with open(os.path.join(root, fileName), 'rb') as fs:
+      ptn = Ptn(name=fileName, data=fs.read())
+    if fileName == PARTITION_TABLE:
+      # This partition must be the very first one.
+      ptns.insert(0, ptn)
+    else:
+      ptns.append(ptn)
+    totalSize += ptn.size
+
+  if ptns[0].name != PARTITION_TABLE:
+    # "partition-table" must exists in firmware update file.
+    raise FirmwareException('"%s" must exists.' % PARTITION_TABLE)
+
+  return ptns, totalSize
+
+headerStruct = struct.Struct('>I 16s 64s 8s')
+#                              - --- --- --
+#                              |  |   |   |
+#                      Siez <--+  |   |   |
+#                      MD5 sum <--+   |   |
+#                      Vendor name <--+   |
+#                      Model id        <--+
+
+class FirmwareException(Exception): pass
+
+def firmwareHeader(opt, model, payloadSize):
+  size = headerStruct.size + PTN_TABLE_SIZE + payloadSize
+  md5 = model.get('md5Placeholder', DEFAULT_MD5_PLACEHOLDER)
+  vendor = model.get('vendor', DEFAULT_VENDOR)
+
+  return headerStruct.pack(
+      size,
+      md5,
+      vendor,
+      model['id'],
+  )
+
+def ptnTable(opt, model, ptns):
+  entries = []
+  offset = PTN_TABLE_SIZE
+  for ptn in ptns:
+    entry = 'fwup-ptn %s base %#07x size %#07x\t\r\n' % (
+      ptn.name,
+      offset,
+      ptn.size,
+    )
+    entries.append(entry)
+    offset += ptn.size
+  tmp = ''.join(entries)
+  return '%s\x00%s' % (tmp, '\xff' * (PTN_TABLE_SIZE - len(tmp) - 1))
+
+def pack(opt):
+  try:
+    model = MODELS[opt['--model']]
+  except KeyError as e:
+    raise FirmwareException('Unsupported model', opt['--model'])
+
+  ptns, totalSize = loadPtns(opt)
+  with open(opt['FILE'], 'wb') as fs:
+    fs.write(firmwareHeader(opt, model, totalSize))
+    fs.write(ptnTable(opt, model, ptns))
+    for ptn in ptns:
+      fs.write(ptn.data)
+
+  return fixMd5(opt)
+
+def unpack(opt):
+  with open(opt['FILE'], 'rb') as f:
+    data = f.read()
+    mv = memoryview(data)[0x5c:]
+    pt = parsePt(mv)
+    extract(opt, mv, pt)
+
+def entry(opt):
+  if opt['unpack']:
+    return unpack(opt)
+  elif opt['pack']:
+    return pack(opt)
+  elif opt['check-md5']:
+    return checkMd5(opt)
+  elif opt['fix-md5']:
+    return fixMd5(opt)
+  else:
+    return 1
+
+if __name__ == '__main__':
+  opt = docopt.docopt(__opt__ % {'prog': os.path.basename(sys.argv[0])})
+  verbose = opt['--verbose']
+  logging.getLogger().setLevel(getattr(logging, (
+      'ERROR',
+      'WARNING',
+      'INFO',
+      'DEBUG',
+  )[min(verbose, 3)]))
+  logging.debug(opt)
+  sys.exit(entry(opt))
+
+# vim: fenc=utf8 sw=2 ts=2
