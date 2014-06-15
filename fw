@@ -136,6 +136,13 @@ def loadPtns(opt):
   ptns = []
   totalSize = 0
   for fileName in os.listdir(root):
+    # Ignore dot files.
+    if fileName.startswith('.'): continue
+
+    # Ignore directory.
+    path = os.path.join(root, fileName)
+    if os.path.isdir(path): continue
+
     with open(os.path.join(root, fileName), 'rb') as fs:
       ptn = Ptn(name=fileName, data=fs.read())
     if fileName == PARTITION_TABLE:
