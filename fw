@@ -23,16 +23,20 @@ import struct
 import sys
 
 import docopt
+import pyDes
 
 __opt__ = '''Usage:
   %(prog)s unpack [-v... -r DIR] FILE
   %(prog)s pack [-v... -r DIR -m MODEL] FILE
   %(prog)s check-md5 [-v... -m MODEL] FILE
   %(prog)s fix-md5 [-v... -m MODEL] FILE
+  %(prog)s decrypt-config [-v... -o OUTPUT] FILE
+  %(prog)s encrypt-config [-v...-o OUTPUT] FILE
 
 Options:
   -r DIR, --root           Root directory, unpack to or pack from[default: .].
   -m MODEL, --model MODEL  Model ID and version[default: WVR300V1].
+  -o OUTPUT, --output OUTPUT  Output file name.
   -v, --verbose            Verbose mode.
 '''
 
@@ -42,6 +46,7 @@ MODELS = {
   },
 }
 DEFAULT_MD5_PLACEHOLDER = '\x7a\x2b\x15\xed\x9b\x98\x59\x6d\xe5\x04\xab\x44\xac\x2a\x9f\x4e'
+DEFAULT_CONFIG_KEY = '\x47\x8d\xa5\x0b\xf9\xe3\xd2\xcf'
 DEFAULT_VENDOR = 'TP-LINK_TECHNOLOGIES_CO.'
 PTN_TABLE_SIZE = 0x800
 
@@ -209,6 +214,45 @@ def unpack(opt):
     pt = parsePt(mv)
     extract(opt, mv, pt)
 
+def getConfigCipher(opt):
+  return pyDes.des(DEFAULT_CONFIG_KEY, pyDes.ECB)
+
+def decryptConfig(opt):
+  path = opt['FILE']
+  output = opt['--output']
+  if output is None:
+    output = os.path.splitext(path)[0] + '.xml'
+
+  cipher = getConfigCipher(opt)
+  with open(path, 'rb') as f:
+    data = cipher.decrypt(f.read())
+
+  config = data[0x10:]
+  md5sum = hashlib.md5(config).digest()
+  if md5sum != data[:0x10]:
+    logging.warning('MD5 check sum is error.')
+
+  with open(output, 'wb') as f:
+    f.write(config)
+
+  return 0
+
+def encryptConfig(opt):
+  path = opt['FILE']
+  output = opt['--output']
+  if output is None:
+    output = os.path.splitext(path)[0] + '.bin'
+
+  with open(path, 'rb') as f:
+    config = f.read()
+
+  cipher = getConfigCipher(opt)
+  md5sum = hashlib.md5(config).digest()
+  with open(output, 'wb') as f:
+    f.write(cipher.encrypt(md5sum + config))
+
+  return 0
+
 def entry(opt):
   if opt['unpack']:
     return unpack(opt)
@@ -218,6 +262,10 @@ def entry(opt):
     return checkMd5(opt)
   elif opt['fix-md5']:
     return fixMd5(opt)
+  elif opt['decrypt-config']:
+    return decryptConfig(opt)
+  elif opt['encrypt-config']:
+    return encryptConfig(opt)
   else:
     return 1
 
