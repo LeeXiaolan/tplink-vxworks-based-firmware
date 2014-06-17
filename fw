@@ -228,6 +228,9 @@ def decryptConfig(opt):
     data = cipher.decrypt(f.read())
 
   config = data[0x10:]
+  paddingIdx = config.find('\x00')
+  if paddingIdx != -1:
+    config = config[:paddingIdx]
   md5sum = hashlib.md5(config).digest()
   if md5sum != data[:0x10]:
     logging.warning('MD5 check sum is error.')
@@ -248,8 +251,13 @@ def encryptConfig(opt):
 
   cipher = getConfigCipher(opt)
   md5sum = hashlib.md5(config).digest()
+
+  paddingSize = (len(md5sum) + len(config)) % 8
+  if paddingSize != 0: paddingSize = 8 - paddingSize
+  padding = '\x00' * paddingSize
+
   with open(output, 'wb') as f:
-    f.write(cipher.encrypt(md5sum + config))
+    f.write(cipher.encrypt(md5sum + config + padding))
 
   return 0
 
