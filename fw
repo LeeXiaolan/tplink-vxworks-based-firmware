@@ -26,7 +26,7 @@ import docopt
 import pyDes
 
 __opt__ = '''Usage:
-  %(prog)s unpack [-v... -r DIR] FILE
+  %(prog)s unpack [-v... -r DIR -m MODEL] FILE
   %(prog)s pack [-v... -r DIR -m MODEL] FILE
   %(prog)s check-md5 [-v... -m MODEL] FILE
   %(prog)s fix-md5 [-v... -m MODEL] FILE
@@ -35,20 +35,23 @@ __opt__ = '''Usage:
 
 Options:
   -r DIR, --root           Root directory, unpack to or pack from[default: .].
-  -m MODEL, --model MODEL  Model ID and version[default: WVR300V1].
+  -m MODEL, --model MODEL  Model ID and version.
   -o OUTPUT, --output OUTPUT  Output file name.
   -v, --verbose            Verbose mode.
 '''
 
+DEFAULT_MD5_PLACEHOLDER = '\x7a\x2b\x15\xed\x9b\x98\x59\x6d\xe5\x04\xab\x44\xac\x2a\x9f\x4e'
 MODELS = {
   'WVR300V1': {
     'id': '\x03\x00\x00\x01\x00\x00\x00\x01',
+    'md5Placeholder': DEFAULT_MD5_PLACEHOLDER,
   },
 }
-DEFAULT_MD5_PLACEHOLDER = '\x7a\x2b\x15\xed\x9b\x98\x59\x6d\xe5\x04\xab\x44\xac\x2a\x9f\x4e'
 DEFAULT_CONFIG_KEY = '\x47\x8d\xa5\x0b\xf9\xe3\xd2\xcf'
 DEFAULT_VENDOR = 'TP-LINK_TECHNOLOGIES_CO.'
 PTN_TABLE_SIZE = 0x800
+
+E_UNSUPPORTED_MODEL               = 0x03
 
 def parsePt(mv):
   for i in xrange(min(len(mv), 1024)):
@@ -85,9 +88,9 @@ def extract(opt, mv, pt):
       base, size = item['base'], item['size']
       of.write(mv[base:base + size].tobytes())
 
-def calcMd5(opt):
+def calcMd5(opt, model=None):
   try:
-    model = MODELS[opt['--model']]
+    model = model or MODELS[opt['--model']]
   except KeyError as e:
     print 'Unsupported model:', opt['--model']
     model = {}
@@ -220,6 +223,55 @@ def unpack(opt):
     mv = memoryview(data)[0x5c:]
     pt = parsePt(mv)
     extract(opt, mv, pt)
+
+  saveHeader(opt, data)
+
+def saveHeader(opt, data):
+  '''
+  Saving file header for packing-up.
+  '''
+  header = headerStruct.unpack(data[:headerStruct.size])
+  model = getOptModel(opt)
+  if model is not None:
+    # Check md5.
+    actual, expect = calcMd5(opt, model)
+    if actual != expect:
+      logging.warning('MD5 is incorrect for model "%s".', opt['--model'])
+  else:
+    model = detectMd5Key(opt, header)
+    if model is None:
+      logging.warning('MD5 key is unknown, firmware packed-up maybe is useless.')
+      model = {}
+
+  header = list(header)
+  header[1] = model.get('md5Placeholder', DEFAULT_MD5_PLACEHOLDER)
+  with open(os.path.join(opt['--root'], '.header'), 'wb') as f:
+    f.write(headerStruct.pack(*header))
+
+def detectMd5Key(opt, header):
+  '''
+  Try all known md5 key with input file.
+  '''
+  for model in MODELS.itervalues():
+    if 'md5Placeholder' in model:
+      actual, expect = calcMd5(opt, model)
+      if actual == expect:
+        return model
+
+def getOptModel(opt, ex=True):
+  model = opt['--model']
+  if model is None:
+    return None
+  else:
+    try:
+      return MODELS[model]
+    except KeyError as e:
+      if ex:
+        raise FirmwareException(
+            E_UNSUPPORTED_MODEL,
+            'Unsupported model "%s".' % model,
+        )
+      return None
 
 def getConfigCipher(opt):
   return pyDes.des(DEFAULT_CONFIG_KEY, pyDes.ECB)
